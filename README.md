@@ -36,5 +36,43 @@ Q-Learning | Models the Q-function. Optimize based on Bellman equation. Typicall
 
 ## Policy gradient
 
-**Policy gradient** is the gradient of Expected return (our objective) with respect to Policy's parameters. We can derive a nice form for it.
+**Policy gradient** is the gradient of Expected return $J(\pi_\theta)$ (our objective) with respect to Policy's parameters $\theta$. We can derive a nice form for it.
 
+```math
+\nabla_\theta J(\pi_\theta) = \nabla_\theta \mathbb{E}_{\tau\sim \pi_\theta}[R(\tau)]
+```
+```math
+= \nabla_\theta \int_\tau P(\tau|\theta) R(\tau)
+```
+```math
+= \int_\tau \nabla_\theta P(\tau|\theta) R(\tau)
+```
+```math
+= \int_\tau P(\tau|\theta) \nabla_\theta\log P(\tau|\theta) R(\tau)
+```
+```math
+= \mathbb{E}_{\tau\sim\pi_\theta}[\nabla_\theta\log P(\tau|\theta) R(\tau)]
+```
+```math
+= \mathbb{E}_{\tau\sim\pi_\theta}\left[\sum_{t=0}^T \nabla_\theta\log\pi_\theta(a_t|s_t) R(\tau)\right]
+```
+
+Note: A trajectory's log-prob is equal to log-prob of initial state, plus the log-prob sum of (action + state transition). Since initial state and state transition are properties of the environment, they do not depend on policy's parameters. Therefore, the derivative of trajectory's log-prob (wrt policy's parameters) is equal to the sum of log-policy's derivatives.
+
+```math
+\nabla_\theta\log P(\tau|\theta) = \sum_{t=0}^T \nabla_\theta\log\pi_\theta(a_t|s_t)
+```
+
+In the sampling form (estimator)
+
+```math
+\hat g = \frac{1}{|D|} \sum_{\tau\in D}\sum_{t=0}^T \nabla_\theta\log\pi_\theta(a_t|s_t) R(\tau)
+```
+
+Notice that once we sample the trajectories (using current policy), we can bring the gradient operator out of the sum. We can define the loss function
+
+```math
+L = -\frac{1}{|D|} \sum_{\tau\in D}\sum_{t=0}^T \log\pi_\theta(a_t|s_t) R(\tau)
+```
+
+Please note that this loss function is only defined to simplify the computation of policy gradient using an autograd engine. **THERE IS NO MEANING** behind this loss function. Do not try to interpret its value.
