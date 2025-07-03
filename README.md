@@ -191,6 +191,8 @@ Where the penalty coefficient $\beta$ is adjusted automatically over the course 
 
 ### Reinforcement Learning from Human Feedback (RLHF)
 
+**With PPO** (OpenAI)
+
 - https://arxiv.org/abs/1909.08593 / https://github.com/openai/lm-human-preferences
 - https://arxiv.org/abs/2009.01325 / https://github.com/openai/summarize-from-feedback
 - https://arxiv.org/abs/2203.02155 (InstructGPT)
@@ -214,3 +216,11 @@ L_{RM}(\phi) = -\mathbb{E}_{(x,y_0,y_1)\sim D}\left[\log\sigma\left(r_\phi(x,y_1
 The OpenAI papers above then use PPO-Clip to RL-finetune the model with this engineered reward. GAE is used to estimate the Advantage function, which requires estimating the **Value function** with a neural network. This Value function is initialized from the Reward model.
 
 TODO: check OpenAI code to see how they normalize the loss across tokens / samples.
+
+**Direct Preference Optimization** (DPO) https://arxiv.org/abs/2305.18290
+
+Use Reward model's objective to optimize the LLM directly
+
+```math
+L_{DPO}(\theta) = -\mathbb{E}_{(x,y_0,y_1)\sim D}\left[\log\sigma\left(\beta\log\frac{\pi_\theta(y_1|x)}{\pi_{ref}(y_1|x)}-\beta\log\frac{\pi_\theta(y_0|x)}{\pi_{ref}(y_0|x)}\right)\right]
+```
