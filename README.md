@@ -20,7 +20,8 @@ State transition | What happens to the world in the next time step. Depends on t
 Reward | Response from the environment to the agent. Only depends on **current state, current action, and next state**. It can be simplified to only depend on current state, or current state and current action.
 Return | Cumulative reward over a trajectory. The agent's goal is to maximize this. For infinite-horizon, we can include a discount factor.
 Expected return | Since policy and transition can be stochastic, trajectory is stochastic as well. Hence, expected return is computed over the distribution of trajectories. The **optimal policy** maximizes expected return.
-Value function | Expected return at a particular state, following a particular policy. **Action-value function** (or Q-function) additionally conditioned on a particular (current) action. It follows that Value function is expected value of Action-value function over policy (action distribution). **Optimal action** corresponds to optimal Q-function.
+Q-function | (aka Action-value function) Expected return at a particular state **and taking a particular action**, following a particular policy. **Optimal action** corresponds to optimal Q-function.
+Value function | Expected return at a particular state, following a particular policy. It follows that Value function is expected value of Q-function over action distribution (policy at current state).
 Advantage function | The difference between Q-function and Value function i.e. Q - V -> how much a particular action is better than average, given a policy.
 
 ## Model-free vs Model-based
@@ -91,6 +92,46 @@ Using Advantage function - this is the most common since there are many ways to 
 \nabla_\theta J(\pi_\theta) = \mathbb{E}_{\tau\sim\pi_\theta}\left[\sum_{t=0}^T \nabla_\theta\log\pi_\theta(a_t|s_t) A^{\pi_\theta}(s_t,a_t)\right]
 ```
 
+### Estimate Advantage function
+
+```math
+A^\pi(s,a) = Q^\pi(s,a) - V^\pi(s)
+```
+
+One common way to estimate the Value function is with a neural network. We will train the Value function network together with the Policy network.
+
+```math
+L_{VF} = \mathbb{E}_{s\sim D}\left[(V_\phi(s)-R(s))^2\right]
+```
+
+Hence, we can estimate the Value function at current state without integrating all possible trajectories. The same rollout/episode data can be used to train the Policy and Value networks.
+
+**Generalized Advantage Estimator** (GAE)
+
+https://arxiv.org/abs/1506.02438
+
+```math
+\hat A_t^{GAE(\gamma,\lambda)} = \sum_{l=0}^{\infty}(\gamma\lambda)^l\delta_{t+l}
+```
+
+```math
+\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)
+```
+
+Note that the Value function above is estimated as well, using least mean squares optimization mentioned previously.
+
+```math
+\hat A_t^{GAE(\gamma,0)} = r_t + \gamma V(s_{t+1}) - V(s_t)
+```
+
+This expression is TD-residual for the estimated Value function. $r_t + \gamma V(s_{t+1})$ is basically the Q-function if the $V(s_t)$ is a perfect estimate. This Advantage estimator has high bias since the Value function estimator is not accurate.
+
+```math
+\hat A_t^{GAE(\gamma,1)} = \sum_{l=0}^{\infty}\gamma^l r_{t+l} - V(s_t)
+```
+
+The summation term is Return of a particular trajectory sample starting at current state and action. This is an unbiased estimator of Q-function, but it has high variance, which we are trying to avoid.
+
 ### Trust Region Policy Estimation (TRPO)
 
 https://arxiv.org/abs/1502.05477
@@ -106,7 +147,7 @@ L(\theta_{old},\theta) = \mathbb{E}_{s,a\sim\pi_{\theta_{old}}}\left[\frac{\pi_\
 **Average KL-divergence** over states visited by the old policy
 
 ```math
-\bar D_{KL}(\theta|\theta_{old}) = \mathbb{E}_{s\sim\pi_{\theta_{old}}}\left[D_{KL}(\pi_\theta|\pi_{\theta_{old}})\right]
+\bar D_{KL}(\theta|\theta_{old}) = \mathbb{E}_{s\sim\pi_{\theta_{old}}}\left[D_{KL}\left(\pi_\theta(\cdot|s)|\pi_{\theta_{old}}(\cdot|s)\right)\right]
 ```
 
 Theoretical TRPO update
@@ -115,7 +156,9 @@ Theoretical TRPO update
 \theta_{k+1} = \arg\max_\theta L(\theta_k,\theta), \bar D_{KL}(\theta||\theta_k)\leq\delta
 ```
 
-Note that the gradient of surrogate advantage function (wrt policy's parameters) is still equal to policy gradient.
+Note
+- Gradient of surrogate advantage function (wrt policy's parameters) is still equal to policy gradient.
+- Surrogate advantage is taking expectation over $(s,a)\sim\pi_{\theta_{old}}$, instead of summing over the time steps then taking expectation over trajectories.
 
 ### Proximal Policy Optimization (PPO)
 
@@ -124,19 +167,15 @@ https://arxiv.org/abs/1707.06347
 **PPO-clip** Loss function
 
 ```math
-L_{PPO-Clip} = \mathbb{E}_{s,a\sim\pi_{\theta_{old}}}\left[\min\left(\frac{\pi_\theta}{\pi_{\theta_{old}}}A^{\pi_{\theta_{old}}},\mathrm{clip}\left(\frac{\pi_\theta}{\pi_{\theta_{old}}},1-\epsilon,1+\epsilon\right)A^{\pi_{\theta_{old}}}\right)\right]
+L_{PPO-Clip} = \mathbb{E}_{s,a\sim\pi_{\theta_{old}}}\left[\min\left(\frac{\pi_\theta(a|s)}{\pi_{\theta_{old}}(a|s)}A^{\pi_{\theta_{old}}},\mathrm{clip}\left(\frac{\pi_\theta(a|s)}{\pi_{\theta_{old}}(a|s)},1-\epsilon,1+\epsilon\right)A^{\pi_{\theta_{old}}}\right)\right]
 ```
 
 Note that since Advantage $A^{\pi_{\theta_{old}}}$ can be either positive or negative, we can't factor out the Advantage term.
 
-**PPO-Penalty** Loss function
+**PPO-Penalty** (not used much) Loss function
 
 ```math
-L_{PPO-Penalty} = \mathbb{E}_{s,a\sim\pi_{\theta_{old}}}\left[\frac{\pi_\theta}{\pi_{\theta_{old}}}A^{\pi_{\theta_{old}}}-\beta D_{KL}(\pi_{\theta_{old}}|\pi_\theta)\right]
+L_{PPO-Penalty} = \mathbb{E}_{s,a\sim\pi_{\theta_{old}}}\left[\frac{\pi_\theta(a|s)}{\pi_{\theta_{old}}(a|s)}A^{\pi_{\theta_{old}}}-\beta D_{KL}\left(\pi_{\theta_{old}}(\cdot|s)|\pi_\theta(\cdot|s)\right)\right]
 ```
 
 Where the penalty coefficient $\beta$ is adjusted automatically over the course of training.
-
-### Generalized Advantage Estimator (GAE)
-
-https://arxiv.org/abs/1506.02438
