@@ -262,3 +262,20 @@ Reward normalization only shifts mean to zero. Don't rescale it to unit variance
 ```math
 \hat A_t = r(x,y) - \mathrm{mean}(\{r(x,y_i)\}_i)
 ```
+
+**Decoupled Clip and Dynamic Sampling Policy Optimization** (DAPO) https://arxiv.org/abs/2503.14476
+
+On a prompt-response pair $(x,y)$, DAPO modifies PPO loss to have 2 separate clipping values
+
+```math
+L_{DAPO}(x,y,\theta) = \min\left(\frac{\pi_\theta(a|s)}{\pi_{\theta_{old}}(a|s)}\hat A_{t},\mathrm{clip}\left(\frac{\pi_\theta(a|s)}{\pi_{\theta_{old}}(a|s)},1-\epsilon_\mathrm{low},1+\epsilon_\mathrm{high}\right)\hat A_t\right)
+```
+
+Similar to GRPO, Advantage is estimated as normalized rewards. The other important difference is
+1. How sampling is done: Remove all prompts that have 0 or 1 accuracy i.e. sampled responses are all wrong or all correct. This is to avoid normalized reward being zero, which will contribute to training instability.
+2. How expectation is computed: Loss is averaged over **all tokens in a batch**, instead of:
+  - GRPO: loss for each response is averged over its length (per-sample), then averaged over rollouts.
+  - Dr. GRPO: loss for each response is **summed** over its length (per-sample), then averaged over rollouts.
+3. Special treatment for truncated responses: Long responses are truncated. DAPO will either ignore truncated samples (**overlong filtering**) or apply a penalty to the reward function (**soft overlong punishment**).
+
+Unlike GRPO and OpenAI RLHF, DAPO doesn't include any KL penalty term at all, whether in its reward function or loss function.
