@@ -145,7 +145,7 @@ https://arxiv.org/abs/1502.05477
 
 Impose an additional constraint not to deviate too much from the old policy -> avoid big update that can collapse training.
 
-**Surrogate advantage** is a measure of how policy $\pi_\theta$ performs relative to the old policy $\pi_{\theta_{old}}$, using data from the old policy.
+**Surrogate advantage** is a measure of how policy $\pi_\theta$ performs relative to the old policy $\pi_{\theta_{old}}$, **using data from the old policy**.
 
 ```math
 L(\theta_{old},\theta) = \mathbb{E}_{s,a\sim\pi_{\theta_{old}}}\left[\frac{\pi_\theta(a|s)}{\pi_{\theta_{old}}(a|s)}A^{\pi_{\theta_{old}}}(s,a)\right]
@@ -165,7 +165,7 @@ Theoretical TRPO update
 
 Note
 - Gradient of surrogate advantage function (wrt policy's parameters) is still equal to policy gradient.
-- Surrogate advantage is taking expectation over $(s,a)\sim\pi_{\theta_{old}}$, instead of summing over the time steps then taking expectation over trajectories. Not sure if the author is assuming $T$ is the same across different trajectories.
+- Surrogate advantage is taking expectation over $(s,a)\sim\pi_{\theta_{old}}$, instead of summing over the time steps then taking expectation over trajectories. Not sure if the author is assuming $T$ is the same across different trajectories. TODO: double-check this
 
 ### Proximal Policy Optimization (PPO)
 
@@ -189,9 +189,7 @@ Where the penalty coefficient $\beta$ is adjusted automatically over the course 
 
 ## RL algorithms for LLM fine-tuning
 
-### Reinforcement Learning from Human Feedback (RLHF)
-
-**With PPO** (OpenAI)
+**Reinforcement Learning from Human Feedback (RLHF) + PPO** (OpenAI)
 
 - https://arxiv.org/abs/1909.08593 / https://github.com/openai/lm-human-preferences
 - https://arxiv.org/abs/2009.01325 / https://github.com/openai/summarize-from-feedback
@@ -223,4 +221,44 @@ Use Reward model's objective to optimize the LLM directly
 
 ```math
 L_{DPO}(\theta) = -\mathbb{E}_{(x,y_0,y_1)\sim D}\left[\log\sigma\left(\beta\log\frac{\pi_\theta(y_1|x)}{\pi_{ref}(y_1|x)}-\beta\log\frac{\pi_\theta(y_0|x)}{\pi_{ref}(y_0|x)}\right)\right]
+```
+
+**Reinforcement Learning with Verifiable Rewards** (RLVR) First coined in Tulu3 (https://arxiv.org/abs/2411.15124). The reward function comes from an easily verifiable procedure e.g. answer to a math problem.
+
+**Group Relative Policy Optimization** (GRPO) https://arxiv.org/abs/2402.03300
+
+In this setup, state is prefix (prompt $x$ + tokens generated so far $y_{1..t-1}$), and action is next token $y_t$. Number of timesteps is equal to number of generated tokens.
+
+For a given prompt $x$, sample a few responses $\{y\}$ using the old policy. GRPO loss defined on a single $(x,y)$ pair is:
+
+```math
+L_{GRPO}(x,y,\theta) = \frac{1}{|y|}\sum_{t=1}^{|y|}\left\{\min\left[\frac{\pi_\theta(y_t|x,y_{1..t-1})}{\pi_{\theta_{old}}(y_t|x,y_{1..t-1})}\hat A_t,\mathrm{clip}\left(\frac{\pi_\theta(y_t|x,y_{1..t-1})}{\pi_{\theta_{old}}(y_t|x,y_{1..t-1})},1-\epsilon,1+\epsilon\right)\hat A_t\right]\right\}-\beta D_{KL}(\pi_\theta||\pi_{ref})
+```
+
+This is basically PPO-Clip loss with extra KL penalty term (the KL term is opposite direction of PPO-Penalty). Advantage is estimated based on **relative rewards within a group** (hence the name). Also notice that KL penalty is not part of the reward, like RLHF, but part of the loss. TODO: check how KL term is computed.
+
+If we only have reward at the end of each rollout $r(x,y)$, Advantage is estimated as normalized rewards.
+
+```math
+\hat A_t = \frac{r(x,y) - \mathrm{mean}(\{r(x,y_i)\}_i)}{\mathrm{std}(\{r(x,y_i)\}_i)}
+```
+
+If we have rewards at intermediate steps (process supervision), Advantage is estimated as the sum of current and future normalized rewards. TODO: check how reward normalization is done in this case. Each rollout can have different number of (intermediate) rewards.
+
+The full GRPO loss is then averaged over sampled responses $y\sim\pi_{\theta_{old}}$ for a single $x$, then averaged over sampled prompts $x$.
+
+TODO: check DeepSeek-R1 as well
+
+**GRPO Done Right** (Dr. GRPO) https://arxiv.org/abs/2503.20783
+
+Length normalization is removed
+
+```math
+L_{Dr.GRPO}(x,y,\theta) = \sum_{t=1}^{|y|}\left\{\min\left[\frac{\pi_\theta(y_t|x,y_{1..t-1})}{\pi_{\theta_{old}}(y_t|x,y_{1..t-1})}\hat A_t,\mathrm{clip}\left(\frac{\pi_\theta(y_t|x,y_{1..t-1})}{\pi_{\theta_{old}}(y_t|x,y_{1..t-1})},1-\epsilon,1+\epsilon\right)\hat A_t\right]\right\}-\beta D_{KL}(\pi_\theta||\pi_{ref})
+```
+
+Reward normalization only shifts mean to zero. Don't rescale it to unit variance
+
+```math
+\hat A_t = r(x,y) - \mathrm{mean}(\{r(x,y_i)\}_i)
 ```
