@@ -1,11 +1,42 @@
 # https://github.com/huggingface/transformers/blob/v4.54.0/src/transformers/models/qwen3/modeling_qwen3.py
 
+from typing import NamedTuple
+
+import flash_attn
 import safetensors.torch
 import torch
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download, list_repo_files
 from torch import Tensor, nn
 from transformers import Qwen3Config
+
+
+class BatchInfo(NamedTuple):
+    pos_ids: Tensor
+
+    # for packing
+    cu_seqlens: Tensor | None = None
+    max_seqlen: int = 0
+
+    @staticmethod
+    def init_packing(seqs: list[list[int]], device: torch.types.Device = None) -> tuple[Tensor, "BatchInfo"]:
+        input_ids = []
+        pos_ids = []
+        cu_seqlens = [0]
+        max_seqlen = 0
+
+        for seq in seqs:
+            input_ids.extend(seq)
+            seqlen = len(seq)
+            pos_ids.extend(range(seqlen))
+            cu_seqlens.append(cu_seqlens[-1] + seqlen)
+            max_seqlen = max(max_seqlen, seqlen)
+
+        input_ids = torch.tensor(input_ids, device=device)
+        pos_ids = torch.tensor(pos_ids, device=device)
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)  # FA expects int32
+        info = BatchInfo(pos_ids=pos_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        return input_ids, info
 
 
 class Qwen3MLP(nn.Module):
@@ -46,17 +77,42 @@ class Qwen3Attention(nn.Module):
         self.q_norm = nn.RMSNorm(self.head_dim, eps=cfg.rms_norm_eps)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=cfg.rms_norm_eps)
 
-    def forward(self, x: Tensor, pos_embeds: Tensor) -> Tensor:
+    def forward(self, x: Tensor, pos_embeds: Tensor, info: BatchInfo | None = None) -> Tensor:
         hidden_shape = (*x.shape[:-1], -1, self.head_dim)
-        q = apply_rope(self.q_norm(self.q_proj(x).view(hidden_shape)), pos_embeds).transpose(1, 2)
-        k = apply_rope(self.k_norm(self.k_proj(x).view(hidden_shape)), pos_embeds).transpose(1, 2)
-        v = self.v_proj(x).view(hidden_shape).transpose(1, 2)
+        q = apply_rope(self.q_norm(self.q_proj(x).view(hidden_shape)), pos_embeds)
+        k = apply_rope(self.k_norm(self.k_proj(x).view(hidden_shape)), pos_embeds)
+        v = self.v_proj(x).view(hidden_shape)
 
         dropout = self.attention_dropout if self.training else 0.0
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout, is_causal=True, enable_gqa=True)
 
-        out = out.transpose(1, 2).flatten(-2)
-        out = self.o_proj(out)
+        if info is None:
+            if x.ndim == 2:  # F.sdpa() does not dispatch FA/CuDNN if ndim==3
+                q, k, v = [_x.unsqueeze(0) for _x in [q, k, v]]
+            out = F.scaled_dot_product_attention(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                dropout_p=dropout,
+                is_causal=True,
+                enable_gqa=True,
+            ).transpose(1, 2)
+            if x.ndim == 2:
+                out = out.squeeze(0)
+
+        else:
+            out = flash_attn.flash_attn_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q=info.cu_seqlens,
+                cu_seqlens_k=info.cu_seqlens,
+                max_seqlen_q=info.max_seqlen,
+                max_seqlen_k=info.max_seqlen,
+                dropout_p=dropout,
+                causal=True,
+            )
+
+        out = self.o_proj(out.flatten(-2))
         return out
 
 
@@ -68,8 +124,8 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = nn.RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
         self.mlp = Qwen3MLP(cfg)
 
-    def forward(self, x: Tensor, pos_embeds: Tensor) -> Tensor:
-        x = x + self.self_attn(self.input_layernorm(x), pos_embeds)
+    def forward(self, x: Tensor, pos_embeds: Tensor, info: BatchInfo | None = None) -> Tensor:
+        x = x + self.self_attn(self.input_layernorm(x), pos_embeds, info)
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 
@@ -88,14 +144,14 @@ class Qwen3Model(nn.Module):
         self.layers = nn.ModuleList([Qwen3DecoderLayer(cfg, layer_idx) for layer_idx in range(cfg.num_hidden_layers)])
         self.norm = nn.RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
 
-    def forward(self, input_ids: Tensor) -> Tensor:
-        pos_ids = torch.arange(input_ids.shape[1], device=input_ids.device)
+    def forward(self, input_ids: Tensor, info: BatchInfo | None = None) -> Tensor:
+        pos_ids = info.pos_ids if info is not None else torch.arange(input_ids.shape[-1], device=input_ids.device)
         pos_embeds = compute_rope(pos_ids, self.cfg.rope_theta, self.cfg.head_dim)
         pos_embeds = pos_embeds.to(self.embed_tokens.weight.dtype)
 
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
-            hidden_states = layer(hidden_states, pos_embeds)
+            hidden_states = layer(hidden_states, pos_embeds, info)
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -103,11 +159,12 @@ class Qwen3Model(nn.Module):
 class Qwen3ForCausalLM(nn.Module):
     def __init__(self, cfg: Qwen3Config) -> None:
         super().__init__()
+        self.cfg = cfg
         self.model = Qwen3Model(cfg)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
 
-    def forward(self, input_ids: Tensor) -> Tensor:
-        hidden_states = self.model(input_ids)
+    def forward(self, input_ids: Tensor, info: BatchInfo | None = None) -> Tensor:
+        hidden_states = self.model(input_ids, info)
         logits = self.lm_head(hidden_states)
         return logits
 
