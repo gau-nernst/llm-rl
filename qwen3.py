@@ -1,42 +1,12 @@
 # https://github.com/huggingface/transformers/blob/v4.54.0/src/transformers/models/qwen3/modeling_qwen3.py
 
-from typing import NamedTuple
-
-import flash_attn
 import safetensors.torch
 import torch
-import torch.nn.functional as F
 from huggingface_hub import hf_hub_download, list_repo_files
 from torch import Tensor, nn
 from transformers import Qwen3Config
 
-
-class BatchInfo(NamedTuple):
-    pos_ids: Tensor
-
-    # for packing
-    cu_seqlens: Tensor | None = None
-    max_seqlen: int = 0
-
-    @staticmethod
-    def init_packing(seqs: list[list[int]], device: torch.types.Device = None) -> tuple[Tensor, "BatchInfo"]:
-        input_ids = []
-        pos_ids = []
-        cu_seqlens = [0]
-        max_seqlen = 0
-
-        for seq in seqs:
-            input_ids.extend(seq)
-            seqlen = len(seq)
-            pos_ids.extend(range(seqlen))
-            cu_seqlens.append(cu_seqlens[-1] + seqlen)
-            max_seqlen = max(max_seqlen, seqlen)
-
-        input_ids = torch.tensor(input_ids, device=device)
-        pos_ids = torch.tensor(pos_ids, device=device)
-        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)  # FA expects int32
-        info = BatchInfo(pos_ids=pos_ids, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-        return input_ids, info
+from attention import BatchInfo, attention
 
 
 class Qwen3MLP(nn.Module):
@@ -84,34 +54,7 @@ class Qwen3Attention(nn.Module):
         v = self.v_proj(x).view(hidden_shape)
 
         dropout = self.attention_dropout if self.training else 0.0
-
-        if info is None:
-            if x.ndim == 2:  # F.sdpa() does not dispatch FA/CuDNN if ndim==3
-                q, k, v = [_x.unsqueeze(0) for _x in [q, k, v]]
-            out = F.scaled_dot_product_attention(
-                q.transpose(1, 2),
-                k.transpose(1, 2),
-                v.transpose(1, 2),
-                dropout_p=dropout,
-                is_causal=True,
-                enable_gqa=True,
-            ).transpose(1, 2)
-            if x.ndim == 2:
-                out = out.squeeze(0)
-
-        else:
-            out = flash_attn.flash_attn_varlen_func(
-                q,
-                k,
-                v,
-                cu_seqlens_q=info.cu_seqlens,
-                cu_seqlens_k=info.cu_seqlens,
-                max_seqlen_q=info.max_seqlen,
-                max_seqlen_k=info.max_seqlen,
-                dropout_p=dropout,
-                causal=True,
-            )
-
+        out = attention(q, k, v, dropout, info, self.layer_idx)
         out = self.o_proj(out.flatten(-2))
         return out
 
